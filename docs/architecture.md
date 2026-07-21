@@ -74,6 +74,42 @@ region is lost, nothing routes. To make the ingress resilient too:
 - **Azure Front Door** in front of two APIM instances — L7 global entry point with managed TLS
   and host-header rewrite; each APIM runs the active-region policy.
 
+**Option A — Front Door + two Consumption APIM instances** (region-local to ADF):
+
+```mermaid
+flowchart LR
+    AJ["Autosys"]
+    FD{{"Azure Front Door"}}
+    subgraph RA["East US 2"]
+        AP["APIM (Consumption)"] --> FP["ADF Primary"]
+    end
+    subgraph RB["West US 2"]
+        AS["APIM (Consumption)"] --> FS["ADF Secondary"]
+    end
+    AJ --> FD
+    FD -- "active" --> AP
+    FD -. "failover" .-> AS
+```
+
+**Option B — APIM Premium multi-region** (single hostname, one replicated config):
+
+```mermaid
+flowchart LR
+    AJ["Autosys"]
+    subgraph PR["APIM Premium · one hostname"]
+        GA["Gateway · East US 2"]
+        GB["Gateway · West US 2"]
+    end
+    AJ --> PR
+    GA --> FP["ADF Primary"]
+    GB --> FS["ADF Secondary"]
+```
+
+Rough list-price cost (Azure Retail Prices API, East US 2, July 2026): Option A ~$38/month,
+Option B ~$4,190/month. Since Autosys batch triggering does not need sub-second failover, cost
+usually decides: Option A is the default; Option B suits an existing Premium estate or a VNet /
+single-config requirement.
+
 Pick based on whether your requirement is "steer to the active ADF region" (a single APIM is
 enough) or "survive losing an entire Azure region end-to-end" (add multi-region ingress).
 

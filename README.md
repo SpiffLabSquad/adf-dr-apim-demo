@@ -197,7 +197,85 @@ This repo keeps the demo **cheap, fast, and credential-free**. For a production 
 
 > **Full DR** = active-region *backend* selection (this repo) running on *multi-region ingress*
 > (APIM Premium multi-region or Front Door). That gives you a resilient front door **and**
-> automatic routing to the healthy ADF region.
+> automatic routing to the healthy ADF region. The two ingress options are compared below.
+
+---
+
+## Surviving a regional outage: two ingress options
+
+The single Consumption APIM in this demo is a one-region ingress point. To keep the endpoint
+available when its whole region is lost, give it a presence in two regions. Two proven options,
+both running the **same active-region policy**:
+
+### Option A — Azure Front Door + two Consumption APIM instances
+
+```mermaid
+flowchart LR
+    AJ["Autosys<br/>one stable URL"]
+    FD{{"Azure Front Door<br/>global anycast · health-probed"}}
+
+    subgraph RA["Region A · East US 2"]
+        AP["APIM<br/>(Consumption)"]
+        FP["Data Factory<br/>Primary"]
+        AP -- "createRun (MI)" --> FP
+    end
+    subgraph RB["Region B · West US 2"]
+        AS["APIM<br/>(Consumption)"]
+        FS["Data Factory<br/>Secondary"]
+        AS -- "createRun (MI)" --> FS
+    end
+
+    AJ --> FD
+    FD -- "active" --> AP
+    FD -. "failover" .-> AS
+```
+
+Each region is a self-contained APIM → ADF stack, and Front Door fails the whole stack over to
+the healthy region. Lowest cost, fast edge failover, optional WAF.
+
+### Option B — APIM Premium multi-region
+
+```mermaid
+flowchart LR
+    AJ["Autosys<br/>one stable URL"]
+
+    subgraph PR["APIM Premium · one hostname, one config (auto-replicated)"]
+        GA["Gateway<br/>East US 2"]
+        GB["Gateway<br/>West US 2"]
+    end
+
+    FP["Data Factory<br/>Primary · East US 2"]
+    FS["Data Factory<br/>Secondary · West US 2"]
+
+    AJ --> PR
+    GA -- "createRun (MI)" --> FP
+    GB -- "createRun (MI)" --> FS
+```
+
+One logical service with gateways in both regions behind a single hostname; Microsoft manages
+the regional routing and replicates one configuration. Enterprise SLA and VNet support, no
+external router to operate.
+
+### Which to choose
+
+| | Option A — Front Door + 2× Consumption APIM | Option B — APIM Premium multi-region |
+|---|---|---|
+| Regional ingress resilience | Yes (Front Door fails over) | Yes (built in) |
+| Failover speed | Fast (edge probes) | DNS-based (~minutes) — fine for batch |
+| Configuration | Two configs, one shared IaC | One config, auto-replicated |
+| External router to operate | Yes (Front Door) | No |
+| Platform SLA | FD 99.99% + APIM 99.95%/region | APIM 99.99% |
+| VNet integration | No (Consumption) | Yes |
+| **Est. cost** | **~$38 / month** | **~$4,190 / month** |
+| Best fit | Cost-sensitive; this is the only APIM workload | Already on Premium; need VNet / single config / 99.99% |
+
+Because Autosys does scheduled batch triggering, sub-second failover is not required, so cost is
+usually the deciding factor. **Option A is the default recommendation**; choose **Option B** if
+you already run APIM Premium or need VNet integration or a single governed configuration.
+
+> Costs are planning estimates from the Azure Retail Prices API (list price, East US 2,
+> July 2026), modeled at ~300K trigger calls/month. Confirm against the Azure Pricing
+> Calculator and your agreement before budgeting.
 
 ---
 
