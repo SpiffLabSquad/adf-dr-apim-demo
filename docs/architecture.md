@@ -84,15 +84,30 @@ hostname, Microsoft-managed cross-region routing, and **one auto-replicated conf
 policy and `active-region` flag exist once and cannot drift).
 
 ```mermaid
-flowchart LR
-    AJ["Autosys<br/>optional ?region= override"]
-    subgraph PR["APIM Premium · one hostname · one config · VNet / Private Link"]
-        GA["Gateway · East US 2"]
-        GB["Gateway · West US 2"]
+flowchart TB
+    AJ["<b>Autosys</b> — one stable URL<br/>region = ?region= / X-Target-Region, else active-region flag"]
+
+    subgraph APIM["<b>APIM Premium</b> · single hostname · one config (auto-replicated) · VNet / Private Link"]
+        direction LR
+        GA["<b>Gateway · East US 2</b><br/>routing policy · managed identity"]
+        GB["<b>Gateway · West US 2</b><br/>routing policy · managed identity"]
     end
-    AJ --> PR
-    GA -- "createRun (MI)" --> FP["ADF Primary"]
-    GB -. "createRun (MI)" .-> FS["ADF Secondary"]
+
+    subgraph ADF["<b>Azure Data Factory</b> · region-local"]
+        direction LR
+        FP["<b>Primary · East US 2</b><br/>Managed VNet IR / private endpoints"]
+        FS["<b>Secondary · West US 2</b><br/>Managed VNet IR / private endpoints"]
+    end
+
+    AJ ==>|"POST /adf/trigger/{pipeline}"| GA
+    AJ -. "regional failover" .-> GB
+    GA ==>|"createRun via ARM · MI token"| FP
+    GB -. "createRun via ARM · MI token" .-> FS
+
+    classDef active stroke:#107C10,stroke-width:2px,fill:#F3FBF3,color:#243A5E;
+    classDef standby stroke:#C05600,stroke-width:1.5px,fill:#FFF8F0,color:#243A5E;
+    class GA,FP active;
+    class GB,FS standby;
 ```
 
 Why Premium (not a public global router such as Front Door or Traffic Manager):

@@ -251,24 +251,32 @@ Microsoft manages the cross-region routing and replicates **one configuration**,
 and `active-region` flag exist once and cannot drift.
 
 ```mermaid
-flowchart LR
-    AJ["Autosys<br/>one stable URL<br/>optional ?region= override"]
+flowchart TB
+    AJ["<b>Autosys</b> — one stable URL (unchanged on failover)<br/>region = ?region= / X-Target-Region header, else active-region flag"]
 
-    subgraph PR["APIM Premium · one hostname · one config (auto-replicated) · VNet / Private Link"]
-        GA["Gateway<br/>East US 2"]
-        GB["Gateway<br/>West US 2"]
+    subgraph APIM["<b>APIM Premium</b> · single hostname · one configuration (auto-replicated) · VNet / Private Link · 99.99% SLA"]
+        direction LR
+        GA["<b>Gateway · East US 2</b><br/>active-region routing policy<br/>system-assigned managed identity"]
+        GB["<b>Gateway · West US 2</b><br/>active-region routing policy<br/>system-assigned managed identity"]
     end
 
-    subgraph PRI["ADF Primary · East US 2"]
-        FP["pipelines"]
-    end
-    subgraph SEC["ADF Secondary · West US 2"]
-        FS["pipelines"]
+    subgraph ADF["<b>Azure Data Factory</b> · region-local, deployed to both"]
+        direction LR
+        FP["<b>Primary · East US 2</b><br/>DemoPipeline · TestPipeline<br/>Managed VNet IR / private endpoints"]
+        FS["<b>Secondary · West US 2</b><br/>DemoPipeline · TestPipeline<br/>Managed VNet IR / private endpoints"]
     end
 
-    AJ --> PR
-    GA -- "createRun (MI token)" --> FP
-    GB -. "createRun (MI token)" .-> FS
+    AJ ==>|"POST /adf/trigger/{pipeline}"| GA
+    AJ -. "regional failover<br/>(Microsoft-managed routing)" .-> GB
+    GA ==>|"createRun via ARM · MI token"| FP
+    GB -. "createRun via ARM · MI token" .-> FS
+
+    classDef active stroke:#107C10,stroke-width:2px,fill:#F3FBF3,color:#243A5E;
+    classDef standby stroke:#C05600,stroke-width:1.5px,fill:#FFF8F0,color:#243A5E;
+    classDef client stroke:#0078D4,stroke-width:1.5px,fill:#EFF6FC,color:#243A5E;
+    class GA,FP active;
+    class GB,FS standby;
+    class AJ client;
 ```
 
 Why Premium multi-region is the recommendation:
