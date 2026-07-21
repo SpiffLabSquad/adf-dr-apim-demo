@@ -1,0 +1,77 @@
+<!--
+  REFERENCE COPY (rendered for readability) of the APIM operation policy for Pattern 2:
+      POST /adf-ha/trigger/{pipelineName}
+
+  The live policy is deployed by infra/modules/apimActiveRegion.bicep, which:
+    * substitutes __SUB__, __RG__, __PRIFACTORY__, __SECFACTORY__ at deploy time, and
+    * XML-escapes operators inside attributes/expressions
+        <   -> &lt;      &&  -> &amp;&amp;      "   -> &quot;
+  This copy leaves them un-escaped so the logic is easy to read.
+
+  Behaviour: route to whichever ADF region is CURRENTLY ACTIVE (the {{active-region}}
+  named value), and if that region's createRun call fails, automatically fall back to the
+  other region. The calling app always uses the same URL — failover happens inside APIM.
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Active region flag (flip with scripts/switch-region or `az apim nv update`). -->
+    <set-variable name="preferred" value="{{active-region}}" />
+    <choose>
+      <when condition="@((string)context.Variables["preferred"] == "secondary")">
+        <set-variable name="factory1" value="<SECONDARY_FACTORY>" />
+        <set-variable name="region1" value="secondary" />
+        <set-variable name="factory2" value="<PRIMARY_FACTORY>" />
+        <set-variable name="region2" value="primary" />
+      </when>
+      <otherwise>
+        <set-variable name="factory1" value="<PRIMARY_FACTORY>" />
+        <set-variable name="region1" value="primary" />
+        <set-variable name="factory2" value="<SECONDARY_FACTORY>" />
+        <set-variable name="region2" value="secondary" />
+      </otherwise>
+    </choose>
+
+    <!-- 1) Try the ACTIVE region. -->
+    <send-request mode="new" response-variable-name="resp1" timeout="30" ignore-error="true">
+      <set-url>@("https://management.azure.com/subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.DataFactory/factories/" + (string)context.Variables["factory1"] + "/pipelines/" + context.Request.MatchedParameters["pipelineName"] + "/createRun?api-version=2018-06-01")</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+      <set-body>{}</set-body>
+      <authentication-managed-identity resource="https://management.azure.com/" />
+    </send-request>
+
+    <choose>
+      <!-- 2a) Active region accepted the run -> return it. -->
+      <when condition="@(context.Variables.ContainsKey("resp1") && context.Variables["resp1"] != null && ((IResponse)context.Variables["resp1"]).StatusCode < 300)">
+        <return-response>
+          <set-status code="200" reason="OK" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-header name="X-Served-Region" exists-action="override"><value>@((string)context.Variables["region1"])</value></set-header>
+          <set-header name="X-Failover" exists-action="override"><value>false</value></set-header>
+          <set-body>@(((IResponse)context.Variables["resp1"]).Body.As<string>())</set-body>
+        </return-response>
+      </when>
+      <!-- 2b) Active region failed -> automatically fall back to the standby region. -->
+      <otherwise>
+        <send-request mode="new" response-variable-name="resp2" timeout="30" ignore-error="true">
+          <set-url>@("https://management.azure.com/subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.DataFactory/factories/" + (string)context.Variables["factory2"] + "/pipelines/" + context.Request.MatchedParameters["pipelineName"] + "/createRun?api-version=2018-06-01")</set-url>
+          <set-method>POST</set-method>
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-body>{}</set-body>
+          <authentication-managed-identity resource="https://management.azure.com/" />
+        </send-request>
+        <return-response>
+          <set-status code="200" reason="OK" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-header name="X-Served-Region" exists-action="override"><value>@((string)context.Variables["region2"])</value></set-header>
+          <set-header name="X-Failover" exists-action="override"><value>true</value></set-header>
+          <set-body>@(context.Variables.ContainsKey("resp2") && context.Variables["resp2"] != null ? ((IResponse)context.Variables["resp2"]).Body.As<string>() : "{ \"error\": \"both regions unavailable\" }")</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>

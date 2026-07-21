@@ -130,6 +130,36 @@ module trafficManager 'modules/trafficManager.bicep' = {
   }
 }
 
+// ===========================================================================
+// Pattern 2 (no Traffic Manager): a single APIM endpoint that routes to the
+// ADF region currently marked active, with automatic fallback. The primary
+// APIM's identity therefore also needs rights on the SECONDARY factory.
+// ===========================================================================
+module apimActiveRegion 'modules/apimActiveRegion.bicep' = {
+  name: 'apimActiveRegion'
+  params: {
+    apimName: primaryApimName
+    primaryFactoryName: primaryFactoryName
+    secondaryFactoryName: secondaryFactoryName
+    defaultActiveRegion: 'primary'
+  }
+  dependsOn: [
+    apimPrimary
+    adfPrimary
+    adfSecondary
+  ]
+}
+
+resource raPrimaryApimToSecondaryAdf 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(adfSec.id, primaryApimName, dataFactoryContributorRoleId, 'ha')
+  scope: adfSec
+  properties: {
+    principalId: apimPrimary.outputs.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', dataFactoryContributorRoleId)
+    principalType: 'ServicePrincipal'
+  }
+}
+
 output resourceGroupName string = resourceGroup().name
 output trafficManagerProfile string = tmProfileName
 output trafficManagerFqdn string = trafficManager.outputs.profileFqdn
@@ -142,3 +172,7 @@ output secondaryFactoryName string = secondaryFactoryName
 output pipelineName string = pipelineName
 output triggerUrlViaTrafficManager string = 'https://${trafficManager.outputs.profileFqdn}/adf/trigger/${pipelineName}'
 output healthUrlViaTrafficManager string = 'https://${trafficManager.outputs.profileFqdn}/adf/health'
+
+// Pattern 2 (APIM-only active-region routing) — same URL across failovers, no Traffic Manager.
+output haTriggerUrl string = 'https://${apimPrimary.outputs.gatewayHost}/adf-ha/trigger/${pipelineName}'
+output activeRegionNamedValue string = 'active-region'

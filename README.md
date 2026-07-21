@@ -20,6 +20,12 @@ Azure AD tokens or region-specific URLs — APIM's **managed identity** calls AD
 API on its behalf. When the primary region is unhealthy, Traffic Manager's health probe fails
 it out and the **same hostname** resolves to the secondary region.
 
+> **This repo ships two patterns.** **Pattern 1** (above) uses **Traffic Manager** for
+> regional *ingress* failover across two APIM gateways. **Pattern 2** keeps a **single APIM
+> endpoint** and lets APIM route to whichever ADF region is *currently active* — no Traffic
+> Manager and no application change. See
+> [Pattern 2 — APIM-only active-region routing](#pattern-2--apim-only-active-region-routing-no-traffic-manager).
+
 ---
 
 ## Architecture
@@ -82,13 +88,17 @@ infra/
     dataFactory.bicep        # ADF + a dependency-free DemoPipeline (single Wait activity)
     apim.bicep               # APIM Consumption + MI + /trigger/{pipeline} + /health policies
     trafficManager.bicep     # Priority profile + HTTPS health probe + 2 external endpoints
+    apimActiveRegion.bicep   # Pattern 2: adf-ha API + active-region named value + failover policy
 policies/
   trigger-policy.xml         # Human-readable copy of the trigger operation policy
   health-policy.xml          # Human-readable copy of the health operation policy
+  active-region-policy.xml   # Human-readable copy of the Pattern 2 active-region policy
 scripts/
   deploy.{sh,ps1}            # Create RG + deploy
-  demo.{sh,ps1}              # Trigger through Traffic Manager, print the serving region
-  failover.{sh,ps1}          # Toggle the primary endpoint to prove failover
+  demo.{sh,ps1}              # Pattern 1: trigger through Traffic Manager, print the serving region
+  failover.{sh,ps1}          # Pattern 1: toggle the primary endpoint to prove failover
+  demo-ha.{sh,ps1}           # Pattern 2: call the single APIM endpoint, print serving region
+  switch-region.{sh,ps1}     # Pattern 2: flip the active-region flag (no app change)
   teardown.{sh,ps1}          # Delete everything (one resource group)
 docs/
   architecture.md            # Deeper design notes + production hardening
@@ -169,6 +179,62 @@ secondary factory — same client, same hostname, zero Autosys changes.
 > The scripts disable the Traffic Manager **endpoint** to make failover instant and
 > scripted. In a real outage, the **HTTPS `/adf/health` probe** fails on its own and
 > Traffic Manager withdraws the endpoint after `toleratedNumberOfFailures` (default 3).
+
+---
+
+## Pattern 2 — APIM-only active-region routing (no Traffic Manager)
+
+Sometimes the requirement is: **don't change the application at all, and have APIM send the
+request to the ADF region that is currently active.** This variant uses a **single APIM
+endpoint** and moves the region choice *inside* APIM — no Traffic Manager.
+
+```
+Autosys ─▶ APIM   POST /adf-ha/trigger/{pipeline}
+             │  reads named value  active-region = primary | secondary
+             ├─ active  ─▶ Data Factory (active region)  → returns runId
+             └─ on failure, auto-fallback ─▶ Data Factory (standby region)
+```
+
+- The app always calls the **same URL**: `https://<apim-host>/adf-ha/trigger/<pipeline>`.
+- APIM reads an `active-region` **named value** and triggers that region's factory. If the
+  call fails, the policy **automatically falls back** to the other region.
+- Responses carry `X-Served-Region` (`primary`/`secondary`) and `X-Failover` (`true`/`false`).
+- The primary APIM's managed identity holds **Data Factory Contributor on both factories**.
+
+**Fail over with a single operator action — no app change:**
+```bash
+./scripts/demo-ha.sh                  # served by primary
+./scripts/switch-region.sh secondary  # flip the active-region flag (APIM-side)
+./scripts/demo-ha.sh                  # same URL, now served by secondary
+./scripts/switch-region.sh primary    # flip back
+```
+```powershell
+.\scripts\demo-ha.ps1
+.\scripts\switch-region.ps1 -Region secondary
+.\scripts\demo-ha.ps1
+.\scripts\switch-region.ps1 -Region primary
+```
+
+The `active-region` flag is meant to be flipped by an **operator** during a declared failover,
+or by an **automated health runbook** that watches real data-plane / integration-runtime
+health. (Remember: `createRun` returning `200` only means ARM *accepted* the run — a true
+health signal should reflect IR/data health, not just trigger acceptance. The built-in
+auto-fallback covers a hard `createRun` failure; the flag covers a *declared* failover.)
+
+### Pattern 1 vs Pattern 2
+
+| | Pattern 1 — Traffic Manager | Pattern 2 — APIM-only |
+|---|---|---|
+| Regional **ingress** failover | ✅ Two APIMs, DNS failover | ⚠️ No — the single APIM is a one-region ingress point |
+| ADF **backend** selection | Each APIM hits its own factory | One APIM picks the active factory + auto-fallback |
+| App change on failover | None (same TM hostname) | None (same APIM hostname) |
+| External router | Traffic Manager (or Front Door) | None |
+| Best when | You must survive losing a whole region end-to-end | You want APIM to steer to the active ADF and can accept a single-region APIM (or add Premium multi-region) |
+
+> **Combine them for full DR:** run Pattern 2's active-region routing on an APIM that is itself
+> multi-region — either **APIM Premium multi-region** (one hostname, gateways in N regions, no
+> Traffic Manager to manage) or the two-APIM + Traffic Manager ingress from Pattern 1 — for
+> resilient ingress **and** active-region backend selection.
 
 ---
 
