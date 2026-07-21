@@ -4,6 +4,9 @@
 *.tfstate
 *.tfstate.*
 
+# Compiled Bicep output (generated from infra/main.bicep)
+infra/main.json
+
 # Local env / secrets
 .env
 *.local
