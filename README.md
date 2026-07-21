@@ -4,24 +4,23 @@ A deployable reference demo that answers a real customer question:
 
 > *"We trigger Azure Data Factory pipelines from Autosys using the ADF REST API. Without
 > changing anything on the application side, can APIM send the request to the ADF factory in
-> whichever region is currently active — and fail over automatically?"*
+> whichever region is currently active, and fail over without changing the application?"*
 
 **Short answer:** yes. Put a thin **API Management (APIM)** façade in front of ADF that exposes
 one stable endpoint, and let an **`active-region` flag** inside APIM decide which regional
-factory to trigger. If the active region's call fails, the policy **automatically falls back**
-to the other region. The calling application always uses the **same URL** — failover happens
-entirely inside APIM, with no app change and no external router.
+factory to trigger. The calling application always uses the **same URL**; you fail over by
+flipping the flag, entirely inside APIM, with no app change and no external router.
 
 ```
 Autosys ─▶ APIM   POST /adf/trigger/{pipeline}
              │  reads named value  active-region = primary | secondary
-             ├─ active  ─▶ Data Factory (active region)   → returns runId
-             └─ on failure, auto-fallback ─▶ Data Factory (standby region)
+             ├─ primary   ─▶ Data Factory (East US 2)   → returns runId
+             └─ secondary ─▶ Data Factory (West US 2)   → returns runId
 ```
 
 The caller never touches Azure AD tokens or region-specific URLs — APIM's **managed identity**
-calls ADF's `createRun` API on its behalf, and responses carry `X-Served-Region`
-(`primary`/`secondary`) and `X-Failover` (`true`/`false`) so you can see what happened.
+calls ADF's `createRun` API on its behalf, and each response carries an `X-Served-Region`
+(`primary`/`secondary`) header so you can see which region handled it.
 
 ---
 
@@ -39,8 +38,8 @@ flowchart LR
     FS["Data Factory — Secondary<br/>(West US 2) · DemoPipeline"]
 
     AJ --> API
-    API -- "active region: createRun (MI token)" --> FP
-    API -. "auto-fallback on failure" .-> FS
+    API -- "flag = primary: createRun (MI token)" --> FP
+    API -. "flag = secondary" .-> FS
 ```
 
 ### Request flow
@@ -49,28 +48,28 @@ flowchart LR
    URL for that region's factory.
 3. It attaches an ARM token from APIM's **system-assigned managed identity** (which holds
    **Data Factory Contributor** on **both** factories) and calls `createRun`.
-4. If that call fails, the policy **automatically retries the other region** and marks the
-   response `X-Failover: true`.
-5. ADF starts the pipeline run and returns a `runId`.
+4. ADF starts the pipeline run and returns a `runId`, which APIM relays with an
+   `X-Served-Region` header. To fail over, an operator or health runbook flips the flag.
 
 ---
 
 ## How the "active region" is decided
 
-The `active-region` named value is the source of truth. Flip it — with `scripts/switch-region`
-or `az apim nv update` — during a declared failover; no application change is required. Two
-complementary mechanisms:
+The `active-region` named value is the single source of truth. APIM triggers **only** the
+factory in that region and returns its real response — there is no automatic cross-region
+retry, which keeps triggering deterministic and avoids accidental double-runs. You fail over by
+flipping the flag, with `scripts/switch-region` or `az apim nv update`; no application change is
+required. Flip it from:
 
-- **Controlled switch (the flag):** an operator, or an **automated health runbook** that
-  watches real data-plane / integration-runtime health, sets `active-region` to the region
-  that should serve traffic.
-- **Automatic fallback (the policy):** if the active region's `createRun` call outright fails,
-  the policy immediately tries the other region so a single request still succeeds.
+- an **operator** during a declared failover, or
+- an **automated health runbook** that watches real data-plane / integration-runtime health
+  and sets `active-region` to the region that should serve traffic.
 
-> **Why both?** `createRun` returning `200` only means ARM *accepted* the run — not that the
-> pipeline will succeed (a region's integration runtime or data tier could be down while ARM
-> is fine). Automatic fallback covers a hard `createRun` failure; the flag covers a *declared*
-> failover driven by a real health signal.
+> **Why flag-driven and not automatic?** `createRun` returning `200` only means ARM *accepted*
+> the run — not that the pipeline will succeed (a region's integration runtime or data tier
+> could be down while ARM is fine). And because `createRun` is **not idempotent**, silently
+> retrying the other region on a lost response could start the pipeline **twice**. Driving
+> failover from a real health signal (the flag) avoids both problems.
 
 ---
 
@@ -81,7 +80,7 @@ infra/
   main.bicep                 # Orchestration (RG-scoped): 1 APIM, 2 ADF, role assignments
   main.parameters.json       # Sample parameters
   modules/
-    dataFactory.bicep        # ADF + a dependency-free DemoPipeline (single Wait activity)
+    dataFactory.bicep        # ADF + two dependency-free pipelines: DemoPipeline (Wait) and TestPipeline (parameterized)
     apim.bicep               # APIM Consumption + MI + active-region /adf/trigger policy
 policies/
   active-region-policy.xml   # Human-readable copy of the active-region routing policy
@@ -137,14 +136,13 @@ which keeps this demo fast and cheap. The deploy prints outputs including `apimH
 .\scripts\demo.ps1
 ```
 
-Expected output (abridged) — note `X-Served-Region` and `X-Failover`:
+Expected output (abridged) — note `X-Served-Region`:
 
 ```
 Application endpoint (unchanged across failovers):
   POST https://apim-adfdr-pri-xxxx.azure-api.net/adf/trigger/DemoPipeline
 HTTP/1.1 200 OK
 X-Served-Region: primary
-X-Failover: false
 {"runId":"e1f2...."}
 ```
 
@@ -165,6 +163,23 @@ X-Failover: false
 
 After the switch, `X-Served-Region` flips to `secondary` and the pipeline runs in the secondary
 factory — same client, same hostname, zero application changes.
+
+### Triggering other pipelines
+
+The endpoint takes the pipeline name in the path, so it triggers **any** pipeline that exists in
+the active region's factory. The repo deploys two into both factories:
+
+- `DemoPipeline` — a single `Wait` activity.
+- `TestPipeline` — a parameterized pipeline (`message` parameter with a default) that sets a
+  variable then waits, showing that parameterized pipelines trigger fine with the current policy.
+
+```bash
+curl -X POST https://<apim-host>/adf/trigger/TestPipeline
+```
+
+Because the deployed policy sends an empty body (`{}`), pipeline parameters use their defaults.
+To pass caller-supplied parameters through to `createRun`, forward the request body in the
+policy instead of `{}` (see [`docs/architecture.md`](docs/architecture.md)).
 
 ---
 

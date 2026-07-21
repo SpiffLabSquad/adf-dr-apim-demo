@@ -5,7 +5,7 @@ targetScope = 'resourceGroup'
 //
 //   Autosys -> APIM  POST /adf/trigger/{pipeline}
 //                      routes to the ADF factory in the region that is
-//                      currently active, with automatic fallback.
+//                      currently active (flag-driven; no automatic cross-region retry).
 //
 // One APIM, two Data Factories, all in a single resource group.
 // ===========================================================================

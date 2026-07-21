@@ -72,33 +72,29 @@ resource api 'Microsoft.ApiManagement/service/apis@2023-05-01-preview' = {
 
 // ---------------------------------------------------------------------------
 // POST /adf/trigger/{pipelineName}
-// Routes to whichever ADF region is currently active ({{active-region}}), and
-// automatically falls back to the other region if that call fails. The managed
+// Triggers ONLY the ADF region currently marked active ({{active-region}}) and
+// relays that factory's real response. Failover is flag-driven — there is no
+// automatic cross-region retry (createRun is not idempotent). The managed
 // identity holds Data Factory Contributor on BOTH factories.
 // ---------------------------------------------------------------------------
 var policyTemplate = '''
 <policies>
   <inbound>
     <base />
-    <!-- The active region is a flag operators (or a health runbook) flip during failover. -->
+    <!-- Route to whichever ADF region is currently active. -->
     <set-variable name="preferred" value="{{active-region}}" />
     <choose>
       <when condition="@((string)context.Variables[&quot;preferred&quot;] == &quot;secondary&quot;)">
-        <set-variable name="factory1" value="__SECFACTORY__" />
-        <set-variable name="region1" value="secondary" />
-        <set-variable name="factory2" value="__PRIFACTORY__" />
-        <set-variable name="region2" value="primary" />
+        <set-variable name="factory" value="__SECFACTORY__" />
+        <set-variable name="servedRegion" value="secondary" />
       </when>
       <otherwise>
-        <set-variable name="factory1" value="__PRIFACTORY__" />
-        <set-variable name="region1" value="primary" />
-        <set-variable name="factory2" value="__SECFACTORY__" />
-        <set-variable name="region2" value="secondary" />
+        <set-variable name="factory" value="__PRIFACTORY__" />
+        <set-variable name="servedRegion" value="primary" />
       </otherwise>
     </choose>
-    <!-- Attempt the ACTIVE region first. -->
-    <send-request mode="new" response-variable-name="resp1" timeout="30" ignore-error="true">
-      <set-url>@("https://management.azure.com/subscriptions/__SUB__/resourceGroups/__RG__/providers/Microsoft.DataFactory/factories/" + (string)context.Variables["factory1"] + "/pipelines/" + context.Request.MatchedParameters["pipelineName"] + "/createRun?api-version=2018-06-01")</set-url>
+    <send-request mode="new" response-variable-name="adfResponse" timeout="30" ignore-error="false">
+      <set-url>@("https://management.azure.com/subscriptions/__SUB__/resourceGroups/__RG__/providers/Microsoft.DataFactory/factories/" + (string)context.Variables["factory"] + "/pipelines/" + context.Request.MatchedParameters["pipelineName"] + "/createRun?api-version=2018-06-01")</set-url>
       <set-method>POST</set-method>
       <set-header name="Content-Type" exists-action="override">
         <value>application/json</value>
@@ -106,48 +102,16 @@ var policyTemplate = '''
       <set-body>{}</set-body>
       <authentication-managed-identity resource="https://management.azure.com/" />
     </send-request>
-    <choose>
-      <when condition="@(context.Variables.ContainsKey(&quot;resp1&quot;) &amp;&amp; context.Variables[&quot;resp1&quot;] != null &amp;&amp; ((IResponse)context.Variables[&quot;resp1&quot;]).StatusCode &lt; 300)">
-        <return-response>
-          <set-status code="200" reason="OK" />
-          <set-header name="Content-Type" exists-action="override">
-            <value>application/json</value>
-          </set-header>
-          <set-header name="X-Served-Region" exists-action="override">
-            <value>@((string)context.Variables["region1"])</value>
-          </set-header>
-          <set-header name="X-Failover" exists-action="override">
-            <value>false</value>
-          </set-header>
-          <set-body>@(((IResponse)context.Variables["resp1"]).Body.As&lt;string&gt;())</set-body>
-        </return-response>
-      </when>
-      <otherwise>
-        <!-- Active region failed: automatically fall back to the standby region. -->
-        <send-request mode="new" response-variable-name="resp2" timeout="30" ignore-error="true">
-          <set-url>@("https://management.azure.com/subscriptions/__SUB__/resourceGroups/__RG__/providers/Microsoft.DataFactory/factories/" + (string)context.Variables["factory2"] + "/pipelines/" + context.Request.MatchedParameters["pipelineName"] + "/createRun?api-version=2018-06-01")</set-url>
-          <set-method>POST</set-method>
-          <set-header name="Content-Type" exists-action="override">
-            <value>application/json</value>
-          </set-header>
-          <set-body>{}</set-body>
-          <authentication-managed-identity resource="https://management.azure.com/" />
-        </send-request>
-        <return-response>
-          <set-status code="200" reason="OK" />
-          <set-header name="Content-Type" exists-action="override">
-            <value>application/json</value>
-          </set-header>
-          <set-header name="X-Served-Region" exists-action="override">
-            <value>@((string)context.Variables["region2"])</value>
-          </set-header>
-          <set-header name="X-Failover" exists-action="override">
-            <value>true</value>
-          </set-header>
-          <set-body>@(context.Variables.ContainsKey("resp2") &amp;&amp; context.Variables["resp2"] != null ? ((IResponse)context.Variables["resp2"]).Body.As&lt;string&gt;() : "{ \"error\": \"both regions unavailable\" }")</set-body>
-        </return-response>
-      </otherwise>
-    </choose>
+    <return-response>
+      <set-status code="@(((IResponse)context.Variables[&quot;adfResponse&quot;]).StatusCode)" reason="@(((IResponse)context.Variables[&quot;adfResponse&quot;]).StatusReason)" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-header name="X-Served-Region" exists-action="override">
+        <value>@((string)context.Variables["servedRegion"])</value>
+      </set-header>
+      <set-body>@(((IResponse)context.Variables["adfResponse"]).Body.As&lt;string&gt;())</set-body>
+    </return-response>
   </inbound>
   <backend>
     <base />

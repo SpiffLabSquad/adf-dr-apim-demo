@@ -20,16 +20,22 @@ set per-module.
 The operation policy on `POST /adf/trigger/{pipelineName}`:
 
 1. Reads the `{{active-region}}` named value into a variable.
-2. Orders the two factories as `factory1` (active) and `factory2` (standby) accordingly.
-3. `send-request` (with `authentication-managed-identity`) calls `createRun` on `factory1`.
-4. If that response is missing or non-2xx, it `send-request`s `createRun` on `factory2`
-   (automatic fallback).
-5. Returns the ADF body plus `X-Served-Region` and `X-Failover` headers.
+2. Selects the factory for that region (primary or secondary).
+3. `send-request` (with `authentication-managed-identity`) calls `createRun` on that factory.
+4. Returns the factory's real status and body, plus an `X-Served-Region` header. There is no
+   automatic cross-region retry — failover is driven by flipping the flag.
 
 A human-readable copy lives in [`policies/active-region-policy.xml`](../policies/active-region-policy.xml).
 The version deployed by `infra/modules/apim.bicep` substitutes `__SUB__`, `__RG__`,
-`__PRIFACTORY__`, `__SECFACTORY__` and XML-escapes operators (`<`→`&lt;`, `&&`→`&amp;&amp;`,
-`"`→`&quot;`).
+`__PRIFACTORY__`, `__SECFACTORY__` and XML-escapes operators (`<`→`&lt;`, `"`→`&quot;`).
+
+### Passing pipeline parameters
+
+The demo policy sends an empty body (`<set-body>{}</set-body>`), so triggered pipelines run
+with their default parameter values. To let callers pass parameters through to `createRun`,
+relay the incoming request body instead — e.g. `<set-body>@(context.Request.Body.As<string>(preserveContent: true))</set-body>`
+— and have Autosys POST a JSON object of pipeline parameters. `TestPipeline` demonstrates a
+parameterized pipeline; with the default policy it uses the default `message` value.
 
 ## Managed identity & least privilege
 
@@ -44,12 +50,12 @@ Autosys, APIM, or this repo. For tighter scope, a custom role limited to
 
 The `active-region` named value is the single source of truth. Flip it with
 `scripts/switch-region` or `az apim nv update`; the gateway picks up the change within seconds.
-Two mechanisms work together:
+APIM triggers only the active region and returns its real response — there is no automatic
+cross-region retry. Set the flag from an **operator** during a declared failover, or from an
+**automated health runbook** that watches real data-plane / integration-runtime health.
 
-- **Controlled switch (flag):** an operator or an automated health runbook sets the active
-  region during a declared failover.
-- **Automatic fallback (policy):** a hard `createRun` failure on the active region is retried
-  against the standby region so the individual request still succeeds.
+Failover is intentionally flag-driven, not automatic: because `createRun` is not idempotent,
+silently retrying the other region on a lost response could start the pipeline twice.
 
 Note the subtlety: `createRun` returning `200` only means ARM **accepted** the run — it does not
 prove the pipeline will succeed (a region's integration runtime or data tier could be down while
