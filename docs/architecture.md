@@ -87,14 +87,14 @@ policy and `active-region` flag exist once and cannot drift).
 flowchart LR
     AJ["<b>Autosys</b><br/>one stable URL<br/>region via flag or<br/>?region= / X-Target-Region"]
 
-    subgraph APIM["<b>APIM Premium</b> · one hostname · one config (auto-replicated) · VNet integration · 99.99% SLA"]
+    subgraph APIM["<b>APIM Premium</b> · one hostname · one config (auto-replicated) · 99.99% SLA"]
         direction TB
         GA["<b>Gateway · East US 2</b><br/>routing policy · managed identity"]
         GB["<b>Gateway · West US 2</b><br/>routing policy · managed identity"]
     end
 
-    FP["<b>ADF Primary · East US 2</b><br/>DemoPipeline · TestPipeline<br/>VNet-secured backends<br/>(service / private endpoints)"]
-    FS["<b>ADF Secondary · West US 2</b><br/>DemoPipeline · TestPipeline<br/>VNet-secured backends<br/>(service / private endpoints)"]
+    FP["<b>ADF Primary · East US 2</b><br/>DemoPipeline · TestPipeline"]
+    FS["<b>ADF Secondary · West US 2</b><br/>DemoPipeline · TestPipeline"]
 
     AJ ==>|"POST /adf/trigger/{pipeline}"| GA
     AJ -. "regional failover" .-> GB
@@ -111,13 +111,10 @@ flowchart LR
 
 Why Premium (not a public global router such as Front Door or Traffic Manager):
 
-- **Runs inside your VNet.** Premium supports **VNet integration**, so APIM sits in your network
-  and reaches ADF and other Azure services over the Azure backbone rather than the public
-  internet. Because the workload is entirely in Azure (not on-premises), **service endpoints**
-  are enough to secure those backends — free and with no Private DNS to manage. **Private
-  endpoints** remain available for per-resource isolation or to disable public access entirely,
-  and would be required if a caller ever needed to reach the endpoint from on-premises. Neither a
-  public edge router (Front Door) nor a DNS router (Traffic Manager) can sit inside your network.
+- **Regional-outage survival.** Gateways in multiple regions behind one hostname; losing a region
+  keeps the endpoint serving from the survivor, with no external router to operate. A public
+  edge/DNS router (Front Door / Traffic Manager) sits outside your control plane and adds a
+  separate component to run.
 - **Single configuration.** Policy + flag are replicated across regions automatically; nothing to
   keep in sync.
 - **Enterprise SLA** (99.99%) with availability zones.
@@ -128,28 +125,15 @@ Why Premium (not a public global router such as Front Door or Traffic Manager):
 
 Rough list-price cost (Azure Retail Prices API, East US 2, July 2026): ~$4,190/month (one
 Premium unit per region). This is materially more than the Consumption demo, but it is the tier
-that delivers regional-outage survival **and** VNet integration. Confirm against the Azure
-Pricing Calculator and your agreement before budgeting.
+that delivers regional-outage survival. Confirm against the Azure Pricing Calculator and your
+agreement before budgeting.
 
-### Securing the traffic: service endpoints vs private endpoints
+### The trigger call and network hardening
 
-Both keep traffic to Azure PaaS services (Storage, SQL, Key Vault) off the public internet, but
-differently:
-
-- **Service endpoints** keep the service on its public IP but firewall it to your VNet/subnet;
-  traffic rides the Azure backbone. Free, no DNS changes, VNet-scoped. Since this workload runs
-  **entirely in Azure**, service endpoints are the simplest way to secure the ADF data plane and
-  APIM's access to backends.
-- **Private endpoints (Private Link)** inject a private IP from your subnet mapped to a specific
-  resource instance, let you disable the public endpoint, and are reachable from **on-premises**.
-  Choose these for per-resource isolation, stronger exfiltration control, or on-prem reach — at
-  the cost of per-endpoint charges and Private DNS management.
-
-The trigger call itself is unaffected either way: it targets **Azure Resource Manager**
-(`management.azure.com`), the ADF **control plane**, which is authorized by RBAC — not network
-path. So the managed-identity `createRun` keeps working even with a factory's data plane fully
-locked down. Network hardening therefore applies to the **ingress** (Autosys → APIM, hence
-Premium + VNet) and the **data plane** (below), not to the control-plane trigger.
+The trigger targets **Azure Resource Manager** (`management.azure.com`), the ADF **control
+plane**, which is authorized by RBAC — not network path. So the managed-identity `createRun`
+keeps working regardless of how the factory's data plane is secured. Network hardening therefore
+applies to the **data plane** (below), not to the control-plane trigger.
 
 ## The real DR boundary: data + integration runtimes
 
