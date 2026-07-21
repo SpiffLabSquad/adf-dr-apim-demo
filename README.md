@@ -28,26 +28,40 @@ calls ADF's `createRun` API on its behalf, and each response carries an `X-Serve
 
 ```mermaid
 flowchart LR
-    AJ["Autosys job<br/>(curl / REST)"]
+    AJ["Autosys job<br/>(curl / REST)<br/>one stable URL"]
+    OP(["Operator /<br/>health runbook"])
 
-    subgraph G["APIM gateway (Consumption, East US 2)"]
-        API["POST /adf/trigger/{pipeline}<br/>reads active-region flag<br/>system-assigned identity"]
+    subgraph G["APIM gateway · Consumption · East US 2"]
+        API["POST /adf/trigger/{pipeline}<br/>system-assigned managed identity<br/>relays runId + X-Served-Region<br/>503 if flag invalid"]
+        NV[["active-region flag<br/>primary | secondary"]]
     end
 
-    FP["Data Factory — Primary<br/>(East US 2) · DemoPipeline"]
-    FS["Data Factory — Secondary<br/>(West US 2) · DemoPipeline"]
+    ARM{{"Azure Resource Manager<br/>management.azure.com<br/>pipelines/createRun"}}
 
-    AJ --> API
-    API -- "flag = primary: createRun (MI token)" --> FP
-    API -. "flag = secondary" .-> FS
+    subgraph PRI["ADF Primary · East US 2"]
+        FP["DemoPipeline<br/>TestPipeline"]
+    end
+    subgraph SEC["ADF Secondary · West US 2"]
+        FS["DemoPipeline<br/>TestPipeline"]
+    end
+
+    AJ -- "POST trigger" --> API
+    OP -. "flip flag (az apim nv update)" .-> NV
+    NV -- "selects region" --> API
+    API -- "createRun (MI token)" --> ARM
+    ARM -- "flag = primary" --> FP
+    ARM -. "flag = secondary" .-> FS
 ```
 
 ### Request flow
-1. Autosys calls `POST https://<apim-host>/adf/trigger/DemoPipeline` — one unchanging URL.
-2. The APIM policy reads the **`active-region`** named value and builds the ADF `createRun`
-   URL for that region's factory.
+1. Autosys calls `POST https://<apim-host>/adf/trigger/{pipeline}` — one unchanging URL. Any
+   pipeline deployed to the active factory works (the demo ships `DemoPipeline` and `TestPipeline`).
+2. The APIM policy reads the **`active-region`** named value — returning **503** if it is not
+   `primary`/`secondary` — and builds the ADF `createRun` URL for that region's factory,
+   URL-encoding the pipeline name.
 3. It attaches an ARM token from APIM's **system-assigned managed identity** (which holds
-   **Data Factory Contributor** on **both** factories) and calls `createRun`.
+   **Data Factory Contributor** on **both** factories) and calls `createRun` via Azure Resource
+   Manager.
 4. ADF starts the pipeline run and returns a `runId`, which APIM relays with an
    `X-Served-Region` header. To fail over, an operator or health runbook flips the flag.
 
