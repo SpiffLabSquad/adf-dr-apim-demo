@@ -19,11 +19,15 @@ set per-module.
 
 The operation policy on `POST /adf/trigger/{pipelineName}`:
 
-1. Reads the `{{active-region}}` named value into a variable.
-2. Selects the factory for that region (primary or secondary).
-3. `send-request` (with `authentication-managed-identity`) calls `createRun` on that factory.
-4. Returns the factory's real status and body, plus an `X-Served-Region` header. There is no
-   automatic cross-region retry — failover is driven by flipping the flag.
+1. Determines the target region: a per-request `?region=` query parameter or `X-Target-Region`
+   header if present, otherwise the `{{active-region}}` named value. Reports the choice via an
+   `X-Region-Source` header (`request` or `flag`).
+2. Selects the factory for that region (primary or secondary); an unrecognized region returns
+   `503` rather than defaulting.
+3. `send-request` (with `authentication-managed-identity`) calls `createRun` on that factory,
+   URL-encoding the pipeline name.
+4. Returns the factory's real status and body, plus `X-Served-Region` and `X-Region-Source`.
+   There is no automatic cross-region retry.
 
 A human-readable copy lives in [`policies/active-region-policy.xml`](../policies/active-region-policy.xml).
 The version deployed by `infra/modules/apim.bicep` substitutes `__SUB__`, `__RG__`,
@@ -46,79 +50,79 @@ factories — which is what lets a single gateway trigger either region. No secr
 Autosys, APIM, or this repo. For tighter scope, a custom role limited to
 `Microsoft.DataFactory/factories/pipelines/createRun/action` (plus read) also works.
 
-## Deciding the active region
+## Choosing the region
 
-The `active-region` named value is the single source of truth. Flip it with
-`scripts/switch-region` or `az apim nv update`; the gateway picks up the change within seconds.
-APIM triggers only the active region and returns its real response — there is no automatic
-cross-region retry. Set the flag from an **operator** during a declared failover, or from an
-**automated health runbook** that watches real data-plane / integration-runtime health.
+The target region is decided per request, in this order:
 
-Failover is intentionally flag-driven, not automatic: because `createRun` is not idempotent,
-silently retrying the other region on a lost response could start the pipeline twice.
+1. **Per-request override** — a `?region=primary|secondary` query parameter, or an
+   `X-Target-Region` header. This lets a caller target a region explicitly (controlled cutover,
+   testing, a region-aware scheduler) without any operator action.
+2. **`active-region` named value** — the fallback when no per-request region is supplied. Flip it
+   with `scripts/switch-region` or `az apim nv update`; the gateway picks up the change within
+   seconds. Set it from an operator during a declared failover, or from an automated health
+   runbook that watches real data-plane / integration-runtime health.
+
+Either way APIM triggers only the chosen region and returns its real response, tagged with
+`X-Served-Region` and `X-Region-Source`. An unrecognized region returns `503`.
+
+Failover is intentionally deterministic, not an automatic cross-region retry: because
+`createRun` is not idempotent, silently retrying the other region on a lost response could start
+the pipeline twice.
 
 Note the subtlety: `createRun` returning `200` only means ARM **accepted** the run — it does not
 prove the pipeline will succeed (a region's integration runtime or data tier could be down while
-ARM is healthy). A production active-region signal should reflect **real data-plane / IR health**
+ARM is healthy). A production failover signal should reflect **real data-plane / IR health**
 (a canary pipeline or a customer health endpoint), not merely trigger acceptance.
 
-## Resilient ingress (what a single APIM does *not* give you)
+## Recommended production architecture: APIM Premium multi-region
 
 Moving region selection into APIM removes the need for an external router for **backend
 selection** — but a single APIM instance is itself a **single-region ingress point**. If that
-region is lost, nothing routes. To make the ingress resilient too:
-
-- **APIM Premium multi-region** — one logical APIM with gateways in multiple regions behind a
-  single hostname; Microsoft manages the regional routing. In Premium the policy can read the
-  serving gateway's region (`context.Deployment.Region`) and trigger the co-located ADF
-  automatically, so a regional outage needs no flag change. (Premium is the main cost.)
-- **Azure Front Door** in front of two APIM instances — L7 global entry point with managed TLS
-  and host-header rewrite. Each APIM is region-local (triggers its own factory) and Front Door's
-  health probe decides the region.
-
-In both production options the routing is **region-local** — each gateway targets its co-located
-factory — which differs from this single-APIM demo's shared `active-region` flag. The flag
-pattern remains useful for the narrower case where a region's ADF data plane is degraded while
-its APIM is still healthy.
-
-**Option A — Front Door + two Consumption APIM instances** (region-local to ADF):
+region is lost, nothing routes. The recommended way to make the ingress resilient too is **APIM
+Premium multi-region**: one logical APIM with gateways in multiple regions behind a single
+hostname, Microsoft-managed cross-region routing, and **one auto-replicated configuration** (the
+policy and `active-region` flag exist once and cannot drift).
 
 ```mermaid
 flowchart LR
-    AJ["Autosys"]
-    FD{{"Azure Front Door"}}
-    subgraph RA["East US 2"]
-        AP["APIM (Consumption)"] --> FP["ADF Primary"]
-    end
-    subgraph RB["West US 2"]
-        AS["APIM (Consumption)"] --> FS["ADF Secondary"]
-    end
-    AJ --> FD
-    FD -- "active" --> AP
-    FD -. "failover" .-> AS
-```
-
-**Option B — APIM Premium multi-region** (single hostname, one replicated config):
-
-```mermaid
-flowchart LR
-    AJ["Autosys"]
-    subgraph PR["APIM Premium · one hostname"]
+    AJ["Autosys<br/>optional ?region= override"]
+    subgraph PR["APIM Premium · one hostname · one config · VNet / Private Link"]
         GA["Gateway · East US 2"]
         GB["Gateway · West US 2"]
     end
     AJ --> PR
-    GA --> FP["ADF Primary"]
-    GB --> FS["ADF Secondary"]
+    GA -- "createRun (MI)" --> FP["ADF Primary"]
+    GB -. "createRun (MI)" .-> FS["ADF Secondary"]
 ```
 
-Rough list-price cost (Azure Retail Prices API, East US 2, July 2026): Option A ~$38/month,
-Option B ~$4,190/month. Since Autosys batch triggering does not need sub-second failover, cost
-usually decides: Option A is the default; Option B suits an existing Premium estate or a VNet /
-single-config requirement.
+Why Premium (not a public global router such as Front Door or Traffic Manager):
 
-Pick based on whether your requirement is "steer to the active ADF region" (a single APIM is
-enough) or "survive losing an entire Azure region end-to-end" (add multi-region ingress).
+- **Private networking.** Premium supports **VNet integration / Private Link**, so Autosys can
+  reach the endpoint over a private path and APIM can call ADF privately. This is decisive when
+  the customer uses **private endpoints** — a public edge router (Front Door) or DNS router
+  (Traffic Manager) cannot be the entry point when ingress must stay private, and their public
+  health probes cannot reach private endpoints.
+- **Single configuration.** Policy + flag are replicated across regions automatically; nothing to
+  keep in sync.
+- **Enterprise SLA** (99.99%) with availability zones.
+- **Region-aware routing option.** In Premium the policy can read `context.Deployment.Region` and
+  trigger the co-located ADF automatically, so a regional outage needs no flag change. The
+  per-request `?region=` override and the `active-region` flag still apply for controlled
+  cutovers and for data-plane-only failovers where the APIM region is healthy.
+
+Rough list-price cost (Azure Retail Prices API, East US 2, July 2026): ~$4,190/month (one
+Premium unit per region). This is materially more than the Consumption demo, but it is the tier
+that delivers regional-outage survival **and** private networking. Confirm against the Azure
+Pricing Calculator and your agreement before budgeting.
+
+### Note on the createRun call and private endpoints
+
+The trigger goes to **Azure Resource Manager** (`management.azure.com`), which is the ADF
+**control plane**. ADF private endpoints and `publicNetworkAccess = Disabled` lock down the
+factory's **data plane and portal**, not management operations — those are authorized by RBAC,
+not network path. So the managed-identity `createRun` call keeps working even with the factories
+fully private; the private-endpoint requirement lands on the **ingress** (Autosys → APIM, hence
+Premium/VNet) and on the **data plane** (below).
 
 ## The real DR boundary: data + integration runtimes
 

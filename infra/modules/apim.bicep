@@ -72,17 +72,21 @@ resource api 'Microsoft.ApiManagement/service/apis@2023-05-01-preview' = {
 
 // ---------------------------------------------------------------------------
 // POST /adf/trigger/{pipelineName}
-// Triggers ONLY the ADF region currently marked active ({{active-region}}) and
-// relays that factory's real response. Failover is flag-driven — there is no
-// automatic cross-region retry (createRun is not idempotent). The managed
-// identity holds Data Factory Contributor on BOTH factories.
+// Triggers ONE ADF region and relays its real response. The region is chosen
+// per-request (?region= or X-Target-Region header) or falls back to the
+// {{active-region}} named value. Failover is deliberate — there is no automatic
+// cross-region retry (createRun is not idempotent). The managed identity holds
+// Data Factory Contributor on BOTH factories.
 // ---------------------------------------------------------------------------
 var policyTemplate = '''
 <policies>
   <inbound>
     <base />
-    <!-- Route to whichever ADF region is currently active. -->
-    <set-variable name="preferred" value="{{active-region}}" />
+    <!-- Region can be chosen per-request via ?region= or the X-Target-Region header;
+         if neither is supplied, fall back to the operator-controlled active-region flag. -->
+    <set-variable name="reqRegion" value="@(context.Request.Url.Query.GetValueOrDefault(&quot;region&quot;, context.Request.Headers.GetValueOrDefault(&quot;X-Target-Region&quot;, &quot;&quot;)).ToLower())" />
+    <set-variable name="preferred" value="@(string.IsNullOrEmpty((string)context.Variables[&quot;reqRegion&quot;]) ? &quot;{{active-region}}&quot; : (string)context.Variables[&quot;reqRegion&quot;])" />
+    <set-variable name="regionSource" value="@(string.IsNullOrEmpty((string)context.Variables[&quot;reqRegion&quot;]) ? &quot;flag&quot; : &quot;request&quot;)" />
     <choose>
       <when condition="@((string)context.Variables[&quot;preferred&quot;] == &quot;primary&quot;)">
         <set-variable name="factory" value="__PRIFACTORY__" />
@@ -93,13 +97,13 @@ var policyTemplate = '''
         <set-variable name="servedRegion" value="secondary" />
       </when>
       <otherwise>
-        <!-- Fail loudly on an unexpected flag rather than silently defaulting to a region. -->
+        <!-- Fail loudly on an unexpected region rather than silently defaulting to one. -->
         <return-response>
           <set-status code="503" reason="Service Unavailable" />
           <set-header name="Content-Type" exists-action="override">
             <value>application/json</value>
           </set-header>
-          <set-body>{ "error": "invalid active-region named value; expected 'primary' or 'secondary'" }</set-body>
+          <set-body>{ "error": "invalid region; expected 'primary' or 'secondary' (from ?region=, X-Target-Region header, or the active-region flag)" }</set-body>
         </return-response>
       </otherwise>
     </choose>
@@ -119,6 +123,9 @@ var policyTemplate = '''
       </set-header>
       <set-header name="X-Served-Region" exists-action="override">
         <value>@((string)context.Variables["servedRegion"])</value>
+      </set-header>
+      <set-header name="X-Region-Source" exists-action="override">
+        <value>@((string)context.Variables["regionSource"])</value>
       </set-header>
       <set-body>@(((IResponse)context.Variables["adfResponse"]).Body.As&lt;string&gt;())</set-body>
     </return-response>

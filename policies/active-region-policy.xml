@@ -8,16 +8,20 @@
         <   -> &lt;      "   -> &quot;
   This copy leaves them un-escaped so the logic is easy to read.
 
-  Behaviour: trigger ONLY the ADF region that is currently active (the {{active-region}}
-  named value) and relay that factory's real response. Failover is flag-driven — there is
-  no automatic cross-region retry (createRun is not idempotent, so a silent retry could
-  start the pipeline twice). The calling app always uses the same URL.
+  Behaviour: trigger ONLY one ADF region and relay that factory's real response. The region is
+  chosen per-request via ?region=primary|secondary (or the X-Target-Region header); if neither
+  is supplied it falls back to the operator-controlled {{active-region}} named value. There is
+  no automatic cross-region retry (createRun is not idempotent, so a silent retry could start
+  the pipeline twice). The response reports X-Served-Region and X-Region-Source (request|flag).
 -->
 <policies>
   <inbound>
     <base />
-    <!-- Route to whichever ADF region is currently active. -->
-    <set-variable name="preferred" value="{{active-region}}" />
+    <!-- Region can be chosen per-request via ?region= or the X-Target-Region header;
+         if neither is supplied, fall back to the operator-controlled active-region flag. -->
+    <set-variable name="reqRegion" value="@(context.Request.Url.Query.GetValueOrDefault("region", context.Request.Headers.GetValueOrDefault("X-Target-Region", "")).ToLower())" />
+    <set-variable name="preferred" value="@(string.IsNullOrEmpty((string)context.Variables["reqRegion"]) ? "{{active-region}}" : (string)context.Variables["reqRegion"])" />
+    <set-variable name="regionSource" value="@(string.IsNullOrEmpty((string)context.Variables["reqRegion"]) ? "flag" : "request")" />
     <choose>
       <when condition="@((string)context.Variables["preferred"] == "primary")">
         <set-variable name="factory" value="<PRIMARY_FACTORY>" />
@@ -28,11 +32,11 @@
         <set-variable name="servedRegion" value="secondary" />
       </when>
       <otherwise>
-        <!-- Fail loudly on an unexpected flag rather than silently defaulting to a region. -->
+        <!-- Fail loudly on an unexpected region rather than silently defaulting to one. -->
         <return-response>
           <set-status code="503" reason="Service Unavailable" />
           <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
-          <set-body>{ "error": "invalid active-region named value; expected 'primary' or 'secondary'" }</set-body>
+          <set-body>{ "error": "invalid region; expected 'primary' or 'secondary' (from ?region=, X-Target-Region header, or the active-region flag)" }</set-body>
         </return-response>
       </otherwise>
     </choose>
@@ -51,6 +55,7 @@
       <set-status code="@(((IResponse)context.Variables["adfResponse"]).StatusCode)" reason="@(((IResponse)context.Variables["adfResponse"]).StatusReason)" />
       <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
       <set-header name="X-Served-Region" exists-action="override"><value>@((string)context.Variables["servedRegion"])</value></set-header>
+      <set-header name="X-Region-Source" exists-action="override"><value>@((string)context.Variables["regionSource"])</value></set-header>
       <set-body>@(((IResponse)context.Variables["adfResponse"]).Body.As<string>())</set-body>
     </return-response>
   </inbound>
