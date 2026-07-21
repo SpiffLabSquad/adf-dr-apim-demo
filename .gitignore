@@ -1,0 +1,18 @@
+# Build / IaC artifacts
+*.zip
+.bicep/
+*.tfstate
+*.tfstate.*
+
+# Local env / secrets
+.env
+*.local
+outputs.json
+deployment-outputs.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

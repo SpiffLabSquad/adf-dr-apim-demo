@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "primaryRegion": { "value": "eastus2" },
+    "secondaryRegion": { "value": "westus2" },
+    "publisherEmail": { "value": "you@example.com" },
+    "publisherName": { "value": "ADF DR Demo" },
+    "pipelineName": { "value": "DemoPipeline" }
+  }
+}
