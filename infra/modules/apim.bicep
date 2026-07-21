@@ -84,17 +84,27 @@ var policyTemplate = '''
     <!-- Route to whichever ADF region is currently active. -->
     <set-variable name="preferred" value="{{active-region}}" />
     <choose>
+      <when condition="@((string)context.Variables[&quot;preferred&quot;] == &quot;primary&quot;)">
+        <set-variable name="factory" value="__PRIFACTORY__" />
+        <set-variable name="servedRegion" value="primary" />
+      </when>
       <when condition="@((string)context.Variables[&quot;preferred&quot;] == &quot;secondary&quot;)">
         <set-variable name="factory" value="__SECFACTORY__" />
         <set-variable name="servedRegion" value="secondary" />
       </when>
       <otherwise>
-        <set-variable name="factory" value="__PRIFACTORY__" />
-        <set-variable name="servedRegion" value="primary" />
+        <!-- Fail loudly on an unexpected flag rather than silently defaulting to a region. -->
+        <return-response>
+          <set-status code="503" reason="Service Unavailable" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{ "error": "invalid active-region named value; expected 'primary' or 'secondary'" }</set-body>
+        </return-response>
       </otherwise>
     </choose>
     <send-request mode="new" response-variable-name="adfResponse" timeout="30" ignore-error="false">
-      <set-url>@("https://management.azure.com/subscriptions/__SUB__/resourceGroups/__RG__/providers/Microsoft.DataFactory/factories/" + (string)context.Variables["factory"] + "/pipelines/" + context.Request.MatchedParameters["pipelineName"] + "/createRun?api-version=2018-06-01")</set-url>
+      <set-url>@("https://management.azure.com/subscriptions/__SUB__/resourceGroups/__RG__/providers/Microsoft.DataFactory/factories/" + (string)context.Variables["factory"] + "/pipelines/" + System.Uri.EscapeDataString((string)context.Request.MatchedParameters["pipelineName"]) + "/createRun?api-version=2018-06-01")</set-url>
       <set-method>POST</set-method>
       <set-header name="Content-Type" exists-action="override">
         <value>application/json</value>

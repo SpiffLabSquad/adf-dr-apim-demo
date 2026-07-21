@@ -16,6 +16,10 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
+Write-Host "Ensuring required resource providers are registered ..." -ForegroundColor Cyan
+az provider register -n Microsoft.ApiManagement --wait -o none
+az provider register -n Microsoft.DataFactory --wait -o none
+
 Write-Host "Creating resource group '$ResourceGroup' in $RgLocation ..." -ForegroundColor Cyan
 az group create -n $ResourceGroup -l $RgLocation -o none
 

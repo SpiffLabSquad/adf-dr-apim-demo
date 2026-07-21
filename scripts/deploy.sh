@@ -12,6 +12,10 @@ RG_LOCATION="${RG_LOCATION:-eastus2}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 
+echo "Ensuring required resource providers are registered ..."
+az provider register -n Microsoft.ApiManagement --wait -o none
+az provider register -n Microsoft.DataFactory --wait -o none
+
 echo "Creating resource group '$RG' in $RG_LOCATION ..."
 az group create -n "$RG" -l "$RG_LOCATION" -o none
 

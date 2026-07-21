@@ -204,8 +204,11 @@ This repo keeps the demo **cheap, fast, and credential-free**. For a production 
 ## Surviving a regional outage: two ingress options
 
 The single Consumption APIM in this demo is a one-region ingress point. To keep the endpoint
-available when its whole region is lost, give it a presence in two regions. Two proven options,
-both running the **same active-region policy**:
+available when its whole region is lost, give it a presence in two regions. Both options below
+extend this pattern across two regions, with one design change from the single-APIM demo: each
+gateway triggers its **co-located** ADF (region-local routing), so the global router's health
+check decides the region. The `active-region` flag then covers the narrower case where a
+region's ADF data plane is degraded while its APIM is still healthy.
 
 ### Option A — Azure Front Door + two Consumption APIM instances
 
@@ -283,8 +286,14 @@ you already run APIM Premium or need VNet integration or a single governed confi
 
 - The demo API is **unauthenticated** for simplicity. **Do not** leave `subscriptionRequired: false`
   in production — require a key/cert/OAuth and lock down source IPs.
+- Because the pipeline name is taken from the URL path, an unauthenticated endpoint lets a caller
+  start **any** pipeline in the active factory. In production, require auth **and** restrict which
+  pipeline names can be triggered (e.g. an allow-list in the policy). The policy URL-encodes the
+  pipeline name and returns `503` if the `active-region` flag is not `primary`/`secondary`.
 - APIM uses a **system-assigned managed identity** scoped to **Data Factory Contributor** on the
   two factories — least privilege, no secrets in Autosys.
+- The policy targets the Azure **commercial** cloud ARM endpoint (`management.azure.com`). For
+  Azure Government/China, parameterize the ARM host.
 - No credentials are stored in this repo.
 
 ## Cost

@@ -88,6 +88,8 @@ resource adfSec 'Microsoft.DataFactory/factories@2018-06-01' existing = {
 }
 
 resource raApimPrimary 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  // Role-assignment names must be computable at deployment start, so this derives from the
+  // APIM *name* (not its runtime principalId, which would trigger Bicep BCP120).
   name: guid(adfPri.id, apimName, dataFactoryContributorRoleId)
   scope: adfPri
   properties: {

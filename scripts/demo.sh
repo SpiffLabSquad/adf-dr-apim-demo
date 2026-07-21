@@ -6,12 +6,15 @@ set -euo pipefail
 RG="${RESOURCE_GROUP:-rg-adf-dr-demo}"
 URL="${TRIGGER_URL:-$(az deployment group show -g "$RG" -n main --query properties.outputs.triggerUrl.value -o tsv)}"
 
+BODY_FILE="$(mktemp)"
+trap 'rm -f "$BODY_FILE"' EXIT
+
 echo "Application endpoint (unchanged across failovers):"
 echo "  POST $URL"
 echo "--------------------------------------------------------------"
-curl -sS -D - -o /tmp/adf_body.json -X POST "$URL" \
+curl -sS -D - -o "$BODY_FILE" -X POST "$URL" \
   | grep -Ei 'HTTP/|X-Served-Region' || true
 echo ""
 echo "Response body (ADF createRun -> runId):"
-cat /tmp/adf_body.json 2>/dev/null || true
+cat "$BODY_FILE" 2>/dev/null || true
 echo ""

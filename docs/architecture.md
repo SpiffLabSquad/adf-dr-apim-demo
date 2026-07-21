@@ -69,10 +69,17 @@ selection** — but a single APIM instance is itself a **single-region ingress p
 region is lost, nothing routes. To make the ingress resilient too:
 
 - **APIM Premium multi-region** — one logical APIM with gateways in multiple regions behind a
-  single hostname; Microsoft manages the regional routing. Run the same active-region policy on
-  it for resilient ingress **and** active-region backend selection. (Premium is the main cost.)
+  single hostname; Microsoft manages the regional routing. In Premium the policy can read the
+  serving gateway's region (`context.Deployment.Region`) and trigger the co-located ADF
+  automatically, so a regional outage needs no flag change. (Premium is the main cost.)
 - **Azure Front Door** in front of two APIM instances — L7 global entry point with managed TLS
-  and host-header rewrite; each APIM runs the active-region policy.
+  and host-header rewrite. Each APIM is region-local (triggers its own factory) and Front Door's
+  health probe decides the region.
+
+In both production options the routing is **region-local** — each gateway targets its co-located
+factory — which differs from this single-APIM demo's shared `active-region` flag. The flag
+pattern remains useful for the narrower case where a region's ADF data plane is degraded while
+its APIM is still healthy.
 
 **Option A — Front Door + two Consumption APIM instances** (region-local to ADF):
 
