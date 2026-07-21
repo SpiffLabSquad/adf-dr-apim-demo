@@ -114,6 +114,8 @@ scripts/
   teardown.{sh,ps1}          # Delete everything (one resource group)
 docs/
   architecture.md            # Deeper design notes + production hardening
+  ADF-CrossRegion-DR-Recommendation.docx   # Customer-facing recommendation report
+  images/architecture-premium.png          # Premium multi-region diagram (used by the report)
 ```
 
 ---
@@ -303,6 +305,9 @@ Why Premium multi-region is the recommendation:
 > pipelines' data dependencies (storage, SQL, Key Vault) and **integration runtimes** must be
 > resilient per region — geo-redundant storage, SQL failover groups, and Self-hosted / Managed
 > VNet IR stood up in **both** factories. See [`docs/architecture.md`](docs/architecture.md).
+
+> 📄 A customer-facing summary of this recommendation (with the diagram and cost estimate) is in
+> [`docs/ADF-CrossRegion-DR-Recommendation.docx`](docs/ADF-CrossRegion-DR-Recommendation.docx).
 
 ---
 
