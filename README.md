@@ -23,9 +23,10 @@ Autosys ─▶ APIM   POST /adf/trigger/{pipeline}[?region=primary|secondary]
 Each response carries `X-Served-Region` (which region ran it) and `X-Region-Source` (`flag` or
 `request`). **For production we recommend deploying this on
 [APIM Premium multi-region](#recommended-production-architecture--apim-premium-multi-region)** so
-the endpoint itself survives a regional outage and can use private networking (VNet / Private
-Link). This repo deploys a single **Consumption**-tier APIM as a low-cost validation of the
-identical routing logic.
+the endpoint itself survives a regional outage and can run inside your VNet (securing the ADF
+backends with **service endpoints** or, if you need per-resource isolation, private endpoints).
+This repo deploys a single **Consumption**-tier APIM as a low-cost validation of the identical
+routing logic.
 
 ---
 
@@ -232,7 +233,7 @@ This repo keeps the demo **cheap, fast, and credential-free**. For a production 
 | Area | Demo | Production |
 |---|---|---|
 | **Resilient ingress** | A single APIM instance (one region) is the ingress point | Deploy the same policy on **APIM Premium multi-region** so the endpoint survives losing a region (see [Recommended production architecture](#recommended-production-architecture--apim-premium-multi-region)). |
-| **APIM tier** | Consumption (fast/cheap) | **Premium** — multi-region, VNet / Private Link, 99.99% SLA |
+| **APIM tier** | Consumption (fast/cheap) | **Premium** — multi-region, VNet integration (service / private endpoints), 99.99% SLA |
 | **Auth to APIM** | `subscriptionRequired: false` (open) | Require a **subscription key**, client cert (mTLS), or OAuth; restrict source IPs to the Autosys hosts |
 | **Active-region signal** | Manual flag flip | Drive the flag from an **automated health runbook** keyed on real IR/data-plane health (a canary pipeline or health endpoint), not just `createRun` acceptance |
 | **Data-tier DR** | Not included (pipeline has no data deps) | The real DR boundary is your **data + integration runtimes**: geo-redundant storage (GRS/RA-GRS), SQL failover groups, Key Vault replication, and **Self-hosted IR in HA (2+ nodes)**. ADF itself is redeployable code — keep it in Git/CD. |
@@ -251,23 +252,20 @@ Microsoft manages the cross-region routing and replicates **one configuration**,
 and `active-region` flag exist once and cannot drift.
 
 ```mermaid
-flowchart TB
-    AJ["<b>Autosys</b> — one stable URL (unchanged on failover)<br/>region = ?region= / X-Target-Region header, else active-region flag"]
+flowchart LR
+    AJ["<b>Autosys</b><br/>one stable URL<br/>region via flag or<br/>?region= / X-Target-Region"]
 
-    subgraph APIM["<b>APIM Premium</b> · single hostname · one configuration (auto-replicated) · VNet / Private Link · 99.99% SLA"]
-        direction LR
-        GA["<b>Gateway · East US 2</b><br/>active-region routing policy<br/>system-assigned managed identity"]
-        GB["<b>Gateway · West US 2</b><br/>active-region routing policy<br/>system-assigned managed identity"]
+    subgraph APIM["<b>APIM Premium</b> · one hostname · one config (auto-replicated) · VNet integration · 99.99% SLA"]
+        direction TB
+        GA["<b>Gateway · East US 2</b><br/>active-region routing policy<br/>managed identity"]
+        GB["<b>Gateway · West US 2</b><br/>active-region routing policy<br/>managed identity"]
     end
 
-    subgraph ADF["<b>Azure Data Factory</b> · region-local, deployed to both"]
-        direction LR
-        FP["<b>Primary · East US 2</b><br/>DemoPipeline · TestPipeline<br/>Managed VNet IR / private endpoints"]
-        FS["<b>Secondary · West US 2</b><br/>DemoPipeline · TestPipeline<br/>Managed VNet IR / private endpoints"]
-    end
+    FP["<b>ADF Primary · East US 2</b><br/>DemoPipeline · TestPipeline<br/>VNet-secured backends<br/>(service / private endpoints)"]
+    FS["<b>ADF Secondary · West US 2</b><br/>DemoPipeline · TestPipeline<br/>VNet-secured backends<br/>(service / private endpoints)"]
 
     AJ ==>|"POST /adf/trigger/{pipeline}"| GA
-    AJ -. "regional failover<br/>(Microsoft-managed routing)" .-> GB
+    AJ -. "regional failover" .-> GB
     GA ==>|"createRun via ARM · MI token"| FP
     GB -. "createRun via ARM · MI token" .-> FS
 
@@ -283,10 +281,12 @@ Why Premium multi-region is the recommendation:
 
 - **Survives a regional outage** — gateways in multiple regions behind one hostname; losing a
   region keeps the endpoint serving from the survivor, with no external router for you to operate.
-- **Private networking** — Premium supports **VNet integration / Private Link**, so Autosys can
-  reach the endpoint privately and APIM can sit inside your network. Consumption cannot, and a
-  public global router (Front Door / Traffic Manager) is not an option when ingress must stay
-  private. This is the deciding factor for customers using **private endpoints**.
+- **Runs inside your VNet** — Premium supports **VNet integration**, so APIM sits in your network
+  and reaches ADF and other Azure services over the Azure backbone instead of the public internet.
+  Because the workload is entirely in Azure, **service endpoints** secure those backends at no
+  extra cost and with no Private DNS to manage; **private endpoints** are available if you want
+  per-resource isolation or to disable public access. (Consumption cannot join a VNet at all, and
+  a public global router such as Front Door / Traffic Manager cannot sit inside your network.)
 - **One configuration** — policy + `active-region` flag are defined once and auto-replicated, so
   the two regions can't fall out of sync.
 - **Enterprise SLA** — 99.99% with availability zones.
@@ -305,14 +305,15 @@ Why Premium multi-region is the recommendation:
 | **Total (approx.)** | Single logical, config-replicated, VNet-capable service | **~$4,190** |
 
 > Premium is materially more expensive than the Consumption demo, but it is the tier that
-> delivers regional-outage survival **and** private networking. Planning estimate from the Azure
+> delivers regional-outage survival **and** VNet integration. Planning estimate from the Azure
 > Retail Prices API (list price, East US 2, July 2026); confirm against the Azure Pricing
 > Calculator and your agreement before budgeting.
 
 > **The real DR boundary is still your data plane.** Whichever tier fronts the trigger, the
 > pipelines' data dependencies (storage, SQL, Key Vault) and **integration runtimes** must be
-> resilient per region — geo-redundant storage, SQL failover groups, and Self-hosted / Managed
-> VNet IR stood up in **both** factories. See [`docs/architecture.md`](docs/architecture.md).
+> resilient per region — geo-redundant storage, SQL failover groups, VNet-secured backends
+> (service or private endpoints), and Self-hosted / Managed VNet IR stood up in **both**
+> factories. See [`docs/architecture.md`](docs/architecture.md).
 
 > 📄 A customer-facing summary of this recommendation (with the diagram and cost estimate) is in
 > [`docs/ADF-CrossRegion-DR-Recommendation.docx`](docs/ADF-CrossRegion-DR-Recommendation.docx).
