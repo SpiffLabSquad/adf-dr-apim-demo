@@ -1,27 +1,34 @@
 targetScope = 'resourceGroup'
 
 // ===========================================================================
-// ADF cross-region DR demo:
-//   Autosys -> Traffic Manager -> APIM (region A/B) -> Data Factory (region A/B)
-// Everything lands in a single resource group for trivial teardown.
+// ADF cross-region DR — APIM active-region routing.
+//
+//   Autosys -> APIM  POST /adf/trigger/{pipeline}
+//                      routes to the ADF factory in the region that is
+//                      currently active, with automatic fallback.
+//
+// One APIM, two Data Factories, all in a single resource group.
 // ===========================================================================
 
-@description('Primary Azure region (active).')
+@description('Primary Azure region (default active).')
 param primaryRegion string = 'eastus2'
 
-@description('Secondary Azure region (passive / failover).')
+@description('Secondary Azure region (standby).')
 param secondaryRegion string = 'westus2'
+
+@description('Region that hosts the single APIM gateway.')
+param apimRegion string = primaryRegion
 
 @description('Base token used to derive resource names.')
 param baseName string = 'adfdr'
 
-@description('Suffix appended to globally-unique names (APIM, Traffic Manager DNS).')
+@description('Suffix appended to globally-unique names (APIM).')
 param nameSuffix string = uniqueString(resourceGroup().id)
 
-@description('Publisher email for the APIM instances.')
+@description('Publisher email for the APIM instance.')
 param publisherEmail string
 
-@description('Publisher (organization) name for the APIM instances.')
+@description('Publisher (organization) name for the APIM instance.')
 param publisherName string = 'ADF DR Demo'
 
 @description('Demo pipeline name created in each factory.')
@@ -32,10 +39,7 @@ var dataFactoryContributorRoleId = '673868aa-7521-48a0-acc6-0f60742d39f5'
 
 var primaryFactoryName = 'adf-${baseName}-pri-${nameSuffix}'
 var secondaryFactoryName = 'adf-${baseName}-sec-${nameSuffix}'
-var primaryApimName = 'apim-${baseName}-pri-${nameSuffix}'
-var secondaryApimName = 'apim-${baseName}-sec-${nameSuffix}'
-var tmProfileName = 'tm-${baseName}-${nameSuffix}'
-var tmDnsName = '${baseName}-${nameSuffix}'
+var apimName = 'apim-${baseName}-pri-${nameSuffix}'
 
 // --- Data Factories (one per region) ---
 module adfPrimary 'modules/dataFactory.bicep' = {
@@ -56,38 +60,25 @@ module adfSecondary 'modules/dataFactory.bicep' = {
   }
 }
 
-// --- APIM gateways (one per region), each fronting its regional factory ---
-module apimPrimary 'modules/apim.bicep' = {
-  name: 'apimPrimary'
+// --- Single APIM gateway that routes to the active region ---
+module apim 'modules/apim.bicep' = {
+  name: 'apim'
   params: {
-    apimName: primaryApimName
-    location: primaryRegion
+    apimName: apimName
+    location: apimRegion
     publisherEmail: publisherEmail
     publisherName: publisherName
-    regionLabel: primaryRegion
-    factoryName: primaryFactoryName
+    primaryFactoryName: primaryFactoryName
+    secondaryFactoryName: secondaryFactoryName
+    defaultActiveRegion: 'primary'
   }
   dependsOn: [
     adfPrimary
-  ]
-}
-
-module apimSecondary 'modules/apim.bicep' = {
-  name: 'apimSecondary'
-  params: {
-    apimName: secondaryApimName
-    location: secondaryRegion
-    publisherEmail: publisherEmail
-    publisherName: publisherName
-    regionLabel: secondaryRegion
-    factoryName: secondaryFactoryName
-  }
-  dependsOn: [
     adfSecondary
   ]
 }
 
-// --- Grant each APIM managed identity rights to trigger its regional factory ---
+// --- Grant the APIM managed identity rights to trigger BOTH factories ---
 resource adfPri 'Microsoft.DataFactory/factories@2018-06-01' existing = {
   name: primaryFactoryName
 }
@@ -96,83 +87,31 @@ resource adfSec 'Microsoft.DataFactory/factories@2018-06-01' existing = {
   name: secondaryFactoryName
 }
 
-resource raPrimary 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(adfPri.id, primaryApimName, dataFactoryContributorRoleId)
+resource raApimPrimary 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(adfPri.id, apimName, dataFactoryContributorRoleId)
   scope: adfPri
   properties: {
-    principalId: apimPrimary.outputs.principalId
+    principalId: apim.outputs.principalId
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', dataFactoryContributorRoleId)
     principalType: 'ServicePrincipal'
   }
 }
 
-resource raSecondary 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(adfSec.id, secondaryApimName, dataFactoryContributorRoleId)
+resource raApimSecondary 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(adfSec.id, apimName, dataFactoryContributorRoleId)
   scope: adfSec
   properties: {
-    principalId: apimSecondary.outputs.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', dataFactoryContributorRoleId)
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// --- Traffic Manager: one stable hostname, priority failover across the two gateways ---
-module trafficManager 'modules/trafficManager.bicep' = {
-  name: 'trafficManager'
-  params: {
-    tmProfileName: tmProfileName
-    tmDnsName: tmDnsName
-    primaryApimHost: apimPrimary.outputs.gatewayHost
-    secondaryApimHost: apimSecondary.outputs.gatewayHost
-    primaryRegion: primaryRegion
-    secondaryRegion: secondaryRegion
-    healthPath: '/adf/health'
-  }
-}
-
-// ===========================================================================
-// Pattern 2 (no Traffic Manager): a single APIM endpoint that routes to the
-// ADF region currently marked active, with automatic fallback. The primary
-// APIM's identity therefore also needs rights on the SECONDARY factory.
-// ===========================================================================
-module apimActiveRegion 'modules/apimActiveRegion.bicep' = {
-  name: 'apimActiveRegion'
-  params: {
-    apimName: primaryApimName
-    primaryFactoryName: primaryFactoryName
-    secondaryFactoryName: secondaryFactoryName
-    defaultActiveRegion: 'primary'
-  }
-  dependsOn: [
-    apimPrimary
-    adfPrimary
-    adfSecondary
-  ]
-}
-
-resource raPrimaryApimToSecondaryAdf 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(adfSec.id, primaryApimName, dataFactoryContributorRoleId, 'ha')
-  scope: adfSec
-  properties: {
-    principalId: apimPrimary.outputs.principalId
+    principalId: apim.outputs.principalId
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', dataFactoryContributorRoleId)
     principalType: 'ServicePrincipal'
   }
 }
 
 output resourceGroupName string = resourceGroup().name
-output trafficManagerProfile string = tmProfileName
-output trafficManagerFqdn string = trafficManager.outputs.profileFqdn
-output primaryApimName string = primaryApimName
-output secondaryApimName string = secondaryApimName
-output primaryApimHost string = apimPrimary.outputs.gatewayHost
-output secondaryApimHost string = apimSecondary.outputs.gatewayHost
+output apimName string = apimName
+output apimHost string = apim.outputs.gatewayHost
 output primaryFactoryName string = primaryFactoryName
 output secondaryFactoryName string = secondaryFactoryName
 output pipelineName string = pipelineName
-output triggerUrlViaTrafficManager string = 'https://${trafficManager.outputs.profileFqdn}/adf/trigger/${pipelineName}'
-output healthUrlViaTrafficManager string = 'https://${trafficManager.outputs.profileFqdn}/adf/health'
-
-// Pattern 2 (APIM-only active-region routing) — same URL across failovers, no Traffic Manager.
-output haTriggerUrl string = 'https://${apimPrimary.outputs.gatewayHost}/adf-ha/trigger/${pipelineName}'
 output activeRegionNamedValue string = 'active-region'
+output triggerUrl string = 'https://${apim.outputs.gatewayHost}/adf/trigger/${pipelineName}'

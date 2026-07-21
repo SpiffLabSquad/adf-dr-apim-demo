@@ -36,7 +36,7 @@ resource pipeline 'Microsoft.DataFactory/factories/pipelines@2018-06-01' = {
       }
     ]
     annotations: [
-      'adf-dr-trafficmanager-demo'
+      'adf-dr-apim-demo'
     ]
   }
 }

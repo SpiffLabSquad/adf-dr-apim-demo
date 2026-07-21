@@ -7,77 +7,86 @@ production-hardening guidance behind the demo.
 
 | Resource | Type | Purpose |
 |---|---|---|
-| Traffic Manager profile | `Microsoft.Network/trafficmanagerprofiles` | One global DNS hostname; **Priority** routing (active/passive) with an HTTPS health probe on `/adf/health`. |
-| APIM (x2) | `Microsoft.ApiManagement/service` (Consumption) | Regional façade exposing `POST /adf/trigger/{pipelineName}` and `GET /adf/health`. Holds a system-assigned managed identity. |
-| Data Factory (x2) | `Microsoft.DataFactory/factories` | Regional factory with a dependency-free `DemoPipeline` (single `Wait` activity). |
-| Role assignment (x2) | `Microsoft.Authorization/roleAssignments` | Grants each APIM identity **Data Factory Contributor** on its regional factory. |
+| APIM | `Microsoft.ApiManagement/service` (Consumption) | One gateway exposing `POST /adf/trigger/{pipelineName}`. Holds a system-assigned managed identity and the `active-region` named value. |
+| Data Factory (x2) | `Microsoft.DataFactory/factories` | Regional factories, each with a dependency-free `DemoPipeline` (single `Wait` activity). |
+| Role assignment (x2) | `Microsoft.Authorization/roleAssignments` | Grants the APIM identity **Data Factory Contributor** on **both** factories. |
 
 Everything is deployed into **one resource group** so teardown is a single `az group delete`.
 Resources are regional but a resource group is just metadata — the region of each resource is
 set per-module.
 
-## Why Traffic Manager (and when to prefer Front Door)
+## The routing policy
 
-**Traffic Manager** is a **DNS-based** global load balancer. It never sees your HTTP payload —
-it just answers "which endpoint hostname should this client use right now?" That makes it a
-great, low-cost fit for **API / non-web-content** failover like triggering ADF from Autosys.
+The operation policy on `POST /adf/trigger/{pipelineName}`:
 
-Trade-off: because it's DNS-based, the client ultimately connects to the resolved backend
-host, so **TLS/SNI and the `Host` header must match that backend's certificate**. Two ways to
-satisfy that:
+1. Reads the `{{active-region}}` named value into a variable.
+2. Orders the two factories as `factory1` (active) and `factory2` (standby) accordingly.
+3. `send-request` (with `authentication-managed-identity`) calls `createRun` on `factory1`.
+4. If that response is missing or non-2xx, it `send-request`s `createRun` on `factory2`
+   (automatic fallback).
+5. Returns the ADF body plus `X-Served-Region` and `X-Failover` headers.
 
-1. **Custom domain on APIM (production pattern).** Configure the *same* custom domain
-   (e.g. `adf.contoso.com`) and TLS certificate on **both** APIM instances. CNAME
-   `adf.contoso.com` → `<profile>.trafficmanager.net`. Clients use `adf.contoso.com`, the
-   cert matches, and Traffic Manager silently picks the region.
-2. **Resolve-then-call (this demo).** Without a custom domain, the demo scripts resolve the
-   Traffic Manager CNAME to discover the active `*.azure-api.net` gateway and call it directly,
-   so the wildcard APIM certificate validates. This proves the routing/failover behavior
-   without requiring you to own a domain.
-
-**Azure Front Door** is the L7 alternative. It terminates TLS at the edge, can **rewrite the
-`Host` header** to each APIM's expected hostname, offers **managed certificates** for your
-custom domain, and fails over faster than DNS TTL allows. If you want a single stable URL with
-managed TLS and no custom-domain-on-APIM step, use Front Door in front of the two APIM
-gateways instead of (or with) Traffic Manager.
+A human-readable copy lives in [`policies/active-region-policy.xml`](../policies/active-region-policy.xml).
+The version deployed by `infra/modules/apim.bicep` substitutes `__SUB__`, `__RG__`,
+`__PRIFACTORY__`, `__SECFACTORY__` and XML-escapes operators (`<`→`&lt;`, `&&`→`&amp;&amp;`,
+`"`→`&quot;`).
 
 ## Managed identity & least privilege
 
 APIM authenticates to ADF with its **system-assigned managed identity** via the
-`authentication-managed-identity` policy (resource `https://management.azure.com/`). The
-identity is granted **Data Factory Contributor** (`673868aa-7521-48a0-acc6-0f60742d39f5`) on
-**only** its regional factory. No secrets live in Autosys, APIM, or this repo.
+`authentication-managed-identity` policy (resource `https://management.azure.com/`). The identity
+is granted **Data Factory Contributor** (`673868aa-7521-48a0-acc6-0f60742d39f5`) on **both**
+factories — which is what lets a single gateway trigger either region. No secrets live in
+Autosys, APIM, or this repo. For tighter scope, a custom role limited to
+`Microsoft.DataFactory/factories/pipelines/createRun/action` (plus read) also works.
 
-`createRun` requires write access to the factory; Data Factory Contributor is the built-in
-role that covers it. If you split responsibilities further, a custom role limited to
-`Microsoft.DataFactory/factories/pipelines/createRun/action` (plus read) is even tighter.
+## Deciding the active region
 
-## Health probe & failover timing
+The `active-region` named value is the single source of truth. Flip it with
+`scripts/switch-region` or `az apim nv update`; the gateway picks up the change within seconds.
+Two mechanisms work together:
 
-Traffic Manager probes `HTTPS :443 /adf/health` every `30s`, tolerating `3` failures before
-marking an endpoint degraded. Worst-case detection is roughly
-`intervalInSeconds * (toleratedNumberOfFailures + 1)`. Client failover additionally waits for
-the DNS `ttl` (30s here) to expire so resolvers re-query. Tune these down for tighter RTO, or
-use Front Door for sub-DNS-TTL failover.
+- **Controlled switch (flag):** an operator or an automated health runbook sets the active
+  region during a declared failover.
+- **Automatic fallback (policy):** a hard `createRun` failure on the active region is retried
+  against the standby region so the individual request still succeeds.
+
+Note the subtlety: `createRun` returning `200` only means ARM **accepted** the run — it does not
+prove the pipeline will succeed (a region's integration runtime or data tier could be down while
+ARM is healthy). A production active-region signal should reflect **real data-plane / IR health**
+(a canary pipeline or a customer health endpoint), not merely trigger acceptance.
+
+## Resilient ingress (what a single APIM does *not* give you)
+
+Moving region selection into APIM removes the need for an external router for **backend
+selection** — but a single APIM instance is itself a **single-region ingress point**. If that
+region is lost, nothing routes. To make the ingress resilient too:
+
+- **APIM Premium multi-region** — one logical APIM with gateways in multiple regions behind a
+  single hostname; Microsoft manages the regional routing. Run the same active-region policy on
+  it for resilient ingress **and** active-region backend selection. (Premium is the main cost.)
+- **Azure Front Door** in front of two APIM instances — L7 global entry point with managed TLS
+  and host-header rewrite; each APIM runs the active-region policy.
+
+Pick based on whether your requirement is "steer to the active ADF region" (a single APIM is
+enough) or "survive losing an entire Azure region end-to-end" (add multi-region ingress).
 
 ## The real DR boundary: data + integration runtimes
 
-The factory *definition* is redeployable code — keep it in Git and deploy with CI/CD, exactly
-as this repo does. The parts that actually need a DR strategy are the **data plane** and
+The factory *definition* is redeployable code — keep it in Git and deploy with CI/CD, exactly as
+this repo does. The parts that actually need a DR strategy are the **data plane** and
 **connectivity**:
 
 - **Storage:** GRS / RA-GRS; design pipelines to read/write the paired region on failover.
-- **Databases:** SQL failover groups / geo-replication; repoint linked services in the DR factory.
+- **Databases:** SQL failover groups / geo-replication; repoint linked services in the standby factory.
 - **Secrets:** Key Vault in each region with a secret-sync/replication strategy.
 - **Self-hosted IR:** run it in **high availability** (2+ nodes); for cross-region resilience,
-  register nodes so at least one survives a regional loss, or stand up a second SHIR in the DR
-  factory. Azure IR is regional but ADF can fail back to an auto-resolve/alternate region.
+  stand up a second SHIR registered to the standby factory.
 
 This demo intentionally uses a pipeline with **no data dependencies** so it deploys cleanly
-anywhere and keeps the focus on the **Traffic Manager + APIM + ADF trigger** pattern.
+anywhere and keeps the focus on the **APIM active-region trigger** pattern.
 
 ## Naming & idempotency
 
-Globally-unique names (APIM, Traffic Manager DNS label) are derived from
-`uniqueString(resourceGroup().id)`, so redeploys into the same resource group are idempotent
-and reuse the same hostnames.
+Globally-unique names (APIM) are derived from `uniqueString(resourceGroup().id)`, so redeploys
+into the same resource group are idempotent and reuse the same hostname.

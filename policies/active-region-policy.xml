@@ -1,8 +1,8 @@
 <!--
-  REFERENCE COPY (rendered for readability) of the APIM operation policy for Pattern 2:
-      POST /adf-ha/trigger/{pipelineName}
+  REFERENCE COPY (rendered for readability) of the APIM operation policy for:
+      POST /adf/trigger/{pipelineName}
 
-  The live policy is deployed by infra/modules/apimActiveRegion.bicep, which:
+  The live policy is deployed by infra/modules/apim.bicep, which:
     * substitutes __SUB__, __RG__, __PRIFACTORY__, __SECFACTORY__ at deploy time, and
     * XML-escapes operators inside attributes/expressions
         <   -> &lt;      &&  -> &amp;&amp;      "   -> &quot;

@@ -15,7 +15,7 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 echo "Creating resource group '$RG' in $RG_LOCATION ..."
 az group create -n "$RG" -l "$RG_LOCATION" -o none
 
-echo "Deploying infrastructure (Consumption APIM x2 + ADF x2 + Traffic Manager)..."
+echo "Deploying infrastructure (Consumption APIM + 2x ADF, active-region routing)..."
 az deployment group create \
   -g "$RG" -n main \
   -f "$ROOT/infra/main.bicep" \

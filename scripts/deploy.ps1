@@ -19,7 +19,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Write-Host "Creating resource group '$ResourceGroup' in $RgLocation ..." -ForegroundColor Cyan
 az group create -n $ResourceGroup -l $RgLocation -o none
 
-Write-Host "Deploying infrastructure (Consumption APIM x2 + ADF x2 + Traffic Manager)..." -ForegroundColor Cyan
+Write-Host "Deploying infrastructure (Consumption APIM + 2x ADF, active-region routing)..." -ForegroundColor Cyan
 az deployment group create `
   -g $ResourceGroup -n main `
   -f "$root\infra\main.bicep" `
